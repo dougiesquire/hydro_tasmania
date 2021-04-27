@@ -26,7 +26,7 @@ def open_zarr(path, variables=None, preprocess=None):
 def open_mfzarr(paths, variables=None, preprocess=None):
     """ Open a variables from a zarr collections and combine"""
     ds = [open_zarr(
-        path, variable, preprocess) for path in paths]
+        path, variables, preprocess) for path in paths]
     return xr.combine_by_coords(ds)
 
 
