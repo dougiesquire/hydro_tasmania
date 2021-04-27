@@ -16,8 +16,13 @@ def open_zarr(path, variables=None, preprocess=None):
             return ds
         else:
             return ds[list(set(ds.data_vars) & set(variables))]
-    ds = _get_variables(
-        xr.open_zarr(path, consolidated=True, use_cftime=True))
+    try:
+        ds = xr.open_zarr(path, consolidated=True, use_cftime=True)
+    except KeyError:
+        # Try zip file
+        ds = xr.open_zarr(
+            f'{path}{os.path.extsep}zip', consolidated=True, use_cftime=True)
+    ds = _get_variables(ds)
     if preprocess:
         ds = preprocess(ds)       
     return ds
@@ -194,3 +199,47 @@ def stack_by_init_date(da, init_dates, N_lead_steps, init_date_name='init_date',
     stacked[lead_time_name].attrs['units'] = freq
     
     return stacked
+
+
+def mask_time_period(ds, period, dim='time'):
+    """ Mask a period of time. Only works for cftime objects"""
+    if dim in ds.dims:
+        return ds.sel({dim: period})
+    elif dim in ds.coords:
+        time_bounds = xr.cftime_range(start=period.start, end=period.stop, periods=2, 
+                                      freq=None, calendar=ds.time.calendar_type.lower())
+        mask = (ds[dim].compute() >= time_bounds[0]) & (ds[dim].compute() <= time_bounds[1])
+        return ds.where(mask)
+    
+    
+def get_monthly_clim(ds, dim):
+    """ Return the climatology over a period of time"""
+    return ds.groupby(f'{dim}.month').mean(dim)
+
+
+def get_bias(fcst, obsv, period, method):
+    """ Return the forecast bias over a period"""
+    fcst_clim = get_monthly_clim(
+        mask_time_period(fcst.mean('ensemble'), period), 
+        dim='init_date')
+    obsv_clim = get_monthly_clim(
+        mask_time_period(obsv, period),
+        dim='init_date')
+    if method == 'additive':
+        bias = fcst_clim - obsv_clim
+    elif method == 'multiplicative':
+        bias = fcst_clim / obsv_clim
+    else: 
+        raise ValueError(f'Unrecognised mode {mode}')
+    bias.attrs['bias_correction_method'] = method
+    return bias
+
+
+def remove_bias(fcst, bias):
+    """ Remove the forecast bias"""
+    if bias.attrs['bias_correction_method'] == 'additive':
+        return (fcst.groupby('init_date.month') - bias).drop('month')
+    elif bias.attrs['bias_correction_method'] == 'multiplicative':
+        return (fcst.groupby('init_date.month') / bias).drop('month')
+    else: 
+        raise ValueError(f'Unrecognised mode {mode}')
