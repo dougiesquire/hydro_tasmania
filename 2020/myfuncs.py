@@ -217,6 +217,14 @@ def get_monthly_clim(ds, dim):
     return ds.groupby(f'{dim}.month').mean(dim)
 
 
+def get_monthly_anom(ds, dim, clim=None):
+    """ Return the monthly anomalies"""
+    if clim:
+        return (ds.groupby(f'{dim}.month') - clim).drop('month')
+    else:
+        return (ds.groupby(f'{dim}.month').map(lambda x: x - x.mean(dim))).drop('month')
+
+
 def get_bias(fcst, obsv, period, method):
     """ Return the forecast bias over a period"""
     fcst_clim = get_monthly_clim(
