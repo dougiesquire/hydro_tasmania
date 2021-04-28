@@ -4,6 +4,7 @@ import zipfile
 import numpy as np
 import xarray as xr
 import pandas as pd
+import xskillscore as xs
 
 
 def open_zarr(path, variables=None, preprocess=None):
@@ -251,3 +252,20 @@ def remove_bias(fcst, bias):
         return (fcst.groupby('init_date.month') / bias).drop('month')
     else: 
         raise ValueError(f'Unrecognised mode {mode}')
+        
+        
+def get_metric(obsv, fcst, metric,
+               metric_kwargs=None, period=None):
+    """ Return an xskillscore metric over a given period"""
+    if period:
+        obsv = mask_time_period(obsv.copy(), period=period)
+        fcst = mask_time_period(fcst.copy(), period=period)
+    return getattr(xs, metric)(obsv, fcst, **metric_kwargs)
+
+
+def get_skill_score(obsv, fcst, fcst_baseline, metric, 
+                    metric_kwargs=None, period=None):
+    """ Return a skill score for a given xskillscore metric over a given period"""
+    numerator = get_metric(obsv, fcst, metric, metric_kwargs, period)
+    denominator = get_metric(obsv, fcst_baseline, metric, metric_kwargs, period)
+    return 1 - (numerator / denominator)
