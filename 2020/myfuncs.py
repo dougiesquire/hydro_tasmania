@@ -205,31 +205,40 @@ def stack_by_init_date(da, init_dates, N_lead_steps, init_date_name='init_date',
 def mask_time_period(ds, period, dim='time'):
     """ Mask a period of time. Only works for cftime objects"""
     if dim in ds.dims:
-        return ds.sel({dim: period})
+        masked = ds.sel({dim: period})
     elif dim in ds.coords:
         time_bounds = xr.cftime_range(start=period.start, end=period.stop, periods=2, 
                                       freq=None, calendar=ds.time.calendar_type.lower())
         mask = (ds[dim].compute() >= time_bounds[0]) & (ds[dim].compute() <= time_bounds[1])
-        return ds.where(mask)
+        masked = ds.where(mask)
+    masked.attrs = ds.attrs
+    return masked
     
     
-def get_monthly_clim(ds, dim):
+def get_monthly_clim(ds, dim, period=None):
     """ Return the climatology over a period of time"""
-    return ds.groupby(f'{dim}.month').mean(dim)
+    if period is not None:
+        ds = mask_time_period(ds.copy(), period)
+        ds.attrs['climatological_period'] = str(period)
+    return ds.groupby(f'{dim}.month').mean(dim, keep_attrs=True)
 
 
 def get_monthly_anom(ds, dim, clim=None):
     """ Return the monthly anomalies"""
     if clim:
-        return (ds.groupby(f'{dim}.month') - clim).drop('month')
+        anom = (ds.groupby(f'{dim}.month') - clim).drop('month')
+        anom.attrs['climatological_period'] = clim.attrs['climatological_period']
     else:
-        return (ds.groupby(f'{dim}.month').map(lambda x: x - x.mean(dim))).drop('month')
+        anom = (ds.groupby(f'{dim}.month').map(
+            lambda x: x - x.mean(dim, keep_attrs=True))).drop('month')
+    anom.attrs = {**anom.attrs, **ds.attrs}
+    return anom
 
 
 def get_bias(fcst, obsv, period, method):
     """ Return the forecast bias over a period"""
     fcst_clim = get_monthly_clim(
-        mask_time_period(fcst.mean('ensemble'), period), 
+        mask_time_period(fcst.mean('ensemble', keep_attrs=True), period), 
         dim='init_date')
     obsv_clim = get_monthly_clim(
         mask_time_period(obsv, period),
@@ -241,17 +250,21 @@ def get_bias(fcst, obsv, period, method):
     else: 
         raise ValueError(f'Unrecognised mode {mode}')
     bias.attrs['bias_correction_method'] = method
+    bias.attrs['bias_correction_period'] = str(period)
     return bias
 
 
 def remove_bias(fcst, bias):
     """ Remove the forecast bias"""
     if bias.attrs['bias_correction_method'] == 'additive':
-        return (fcst.groupby('init_date.month') - bias).drop('month')
+        fcst_bc = (fcst.groupby('init_date.month') - bias).drop('month')
     elif bias.attrs['bias_correction_method'] == 'multiplicative':
-        return (fcst.groupby('init_date.month') / bias).drop('month')
+        fcst_bc = (fcst.groupby('init_date.month') / bias).drop('month')
     else: 
         raise ValueError(f'Unrecognised mode {mode}')
+    fcst_bc.attrs['bias_correction_method'] = bias.attrs['bias_correction_method']
+    fcst_bc.attrs['bias_correction_period'] = bias.attrs['bias_correction_period']
+    return fcst_bc
         
         
 def get_metric(obsv, fcst, metric,
