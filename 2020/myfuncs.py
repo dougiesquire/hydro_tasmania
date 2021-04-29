@@ -1,10 +1,14 @@
 import os
+import dask
 import shutil
 import zipfile
+import itertools
 import numpy as np
 import xarray as xr
 import pandas as pd
+import dask.bag as db
 import xskillscore as xs
+import matplotlib.pyplot as plt
 
 
 def open_zarr(path, variables=None, preprocess=None):
@@ -267,18 +271,289 @@ def remove_bias(fcst, bias):
     return fcst_bc
         
         
-def get_metric(obsv, fcst, metric,
+def get_metric(fcst, obsv, metric,
                metric_kwargs=None, period=None):
-    """ Return an xskillscore metric over a given period"""
+    """ Return an xskillscore metric over a given period. If metric is
+        a string, looks for it in xskillscore. Otherwise, metric should
+        be a function that receives obsc, fcst and any other kwargs"""
     if period:
         obsv = mask_time_period(obsv.copy(), period=period)
         fcst = mask_time_period(fcst.copy(), period=period)
-    return getattr(xs, metric)(obsv, fcst, **metric_kwargs)
+    if isinstance(metric, str):
+        return getattr(xs, metric)(obsv, fcst, **metric_kwargs)
+    else:
+        return metric(obsv, fcst, **metric_kwargs)
 
 
-def get_skill_score(obsv, fcst, fcst_baseline, metric, 
+def get_skill_score(fcst, obsv, fcst_baseline, metric, 
                     metric_kwargs=None, period=None):
     """ Return a skill score for a given xskillscore metric over a given period"""
-    numerator = get_metric(obsv, fcst, metric, metric_kwargs, period)
-    denominator = get_metric(obsv, fcst_baseline, metric, metric_kwargs, period)
+    numerator = get_metric(fcst, obsv, metric, metric_kwargs, period)
+    denominator = get_metric(fcst_baseline, obsv, metric, metric_kwargs, period)
     return 1 - (numerator / denominator)
+
+
+def pearson_r_maybe_ensemble_mean(obsv, fcst, **kwargs):
+    if 'ensemble' in fcst.dims:
+        fcst = fcst.copy().mean('ensemble')
+    return xs.pearson_r(obsv, fcst, **kwargs)
+
+def mse_maybe_ensemble_mean(obsv, fcst, **kwargs):
+    if 'ensemble' in fcst.dims:
+        fcst = fcst.copy().mean('ensemble')
+    return xs.mse(obsv, fcst, **kwargs)
+
+
+def random_resample(*args, samples,
+                    function=None, function_kwargs=None, bundle_args=True,
+                    replace=True):
+    """
+        Randomly resample from provided xarray args and return the results of the subsampled dataset passed through \
+        a provided function
+                
+        Parameters
+        ----------
+        *args : xarray DataArray or Dataset
+            Objects containing data to be resampled. The coordinates of the first object are used for resampling and the \
+            same resampling is applied to all objects
+        samples : dictionary
+            Dictionary containing the dimensions to subsample, the number of samples and the continuous block size \
+            within the sample. Of the form {'dim1': (n_samples, block_size), 'dim2': (n_samples, block_size)}. The first \
+            object in args must contain all dimensions listed in samples, but subsequent objects need not.
+        function : function object, optional
+            Function to reduced the subsampled data
+        function_kwargs : dictionary, optional
+            Keyword arguments to provide to function
+        bundle_args : boolean, optional
+            If True, pass all resampled objects to function together, otherwise pass each object through function \
+            separately
+        replace : boolean, optional
+            Whether the sample is with or without replacement
+                
+        Returns
+        -------
+        sample : xarray DataArray or Dataset
+            Array containing the results of passing the subsampled data through function
+    """
+    args_sub = [obj.copy() for obj in args]
+    dim_block_1 = [d for d, s in samples.items() if s[1] == 1]
+
+    # Do all dimensions with block_size = 1 together
+    samples_block_1 = { dim: samples.pop(dim) for dim in dim_block_1 }
+    random_samples = {dim: 
+                      np.random.choice(
+                          len(args_sub[0][dim]),
+                          size=n,
+                          replace=replace)
+                      for dim, (n, _) in samples_block_1.items()}
+    args_sub = [obj.isel(
+        {dim: random_samples[dim] 
+         for dim in (set(random_samples.keys()) & set(obj.dims))}) for obj in args_sub]
+
+    # Do any remaining dimensions
+    for dim, (n, block_size) in samples.items():
+        n_blocks = int(n / block_size)
+        random_samples = [slice(x,x+block_size) 
+                          for x in np.random.choice(
+                              len(args_sub[0][dim])-block_size+1, 
+                              size=n_blocks,
+                              replace=replace)]
+        args_sub = [xr.concat([obj.isel({dim: random_sample}) 
+                               for random_sample in random_samples],
+                              dim=dim) 
+                       if dim in obj.dims else obj 
+                       for obj in args_sub]
+
+    if function:
+        if bundle_args:
+            res = function(*args_sub, **function_kwargs)
+        else:
+            res = tuple([function(obj, **function_kwargs) for obj in args_sub])
+    else:
+        res = tuple(args_sub,)
+
+    if isinstance(res, tuple) & len(res) == 1:
+        return res[0]
+    else:
+        return res
+    
+    
+def n_random_resamples(*args, samples, n_repeats, 
+                       function=None, function_kwargs=None, bundle_args=True, 
+                       replace=True, with_dask=True):
+    """
+        Repeatedly randomly resample from provided xarray objects and return the results of the subsampled dataset passed \
+        through a provided function
+                
+        Parameters
+        ----------
+        args : xarray DataArray or Dataset
+            Objects containing data to be resampled. The coordinates of the first object are used for resampling and the \
+            same resampling is applied to all objects
+        samples : dictionary
+            Dictionary containing the dimensions to subsample, the number of samples and the continuous block size \
+            within the sample. Of the form {'dim1': (n_samples, block_size), 'dim2': (n_samples, block_size)}
+        n_repeats : int
+            Number of times to repeat the resampling process
+        function : function object, optional
+            Function to reduced the subsampled data
+        function_kwargs : dictionary, optional
+            Keyword arguments to provide to function
+        replace : boolean, optional
+            Whether the sample is with or without replacement
+        bundle_args : boolean, optional
+            If True, pass all resampled objects to function together, otherwise pass each object through function \
+            separately
+        with_dask : boolean, optional
+            If True, use dask to parallelize across n_repeats using dask.delayed
+                
+        Returns
+        -------
+        sample : xarray DataArray or Dataset
+            Array containing the results of passing the subsampled data through function
+    """
+
+    if with_dask & (n_repeats > 500):
+        n_args = itertools.repeat(args[0], times=n_repeats)
+        b = db.from_sequence(n_args, npartitions=100)
+        rs_list = b.map(random_resample, *(args[1:]), 
+                        **{'samples':samples, 'function':function, 
+                           'function_kwargs':function_kwargs, 'replace':replace}).compute()
+    else:              
+        resample_ = dask.delayed(random_resample) if with_dask else random_resample
+        rs_list = [resample_(*args,
+                             samples=samples,
+                             function=function,
+                             function_kwargs=function_kwargs,
+                             bundle_args=bundle_args,
+                             replace=replace) for _ in range(n_repeats)] 
+        if with_dask:
+            rs_list = dask.compute(rs_list)[0]
+            
+    if all(isinstance(r, tuple) for r in rs_list):
+        return tuple([xr.concat([r.unify_chunks() for r in rs], dim='k') for rs in zip(*rs_list)])
+    else:
+        return xr.concat([r.unify_chunks() for r in rs_list], dim='k')
+    
+    
+def get_significance(sample, bootstrap, no_skill_value, alpha, transform=None):
+    """ Return points of statistical significance. Statistical significance at 1-alpha is 
+        identified at all points where the sample skill metric is positive (negative) and 
+        the fraction of transformed values in the bootstrapped distribution below (above) 
+        no_skill_value--defining the p-values--is less than or equal to alpha.)
+    """
+        
+    if transform:
+        bootstrap = transform(bootstrap.copy())
+        no_skill_value = transform(no_skill_value)
+        
+    pos_signif = xr.where(bootstrap < no_skill_value, 1, 0).mean('k')  <= alpha
+    neg_signif = xr.where(bootstrap > no_skill_value, 1, 0).mean('k')  <= alpha
+    pos_signif = pos_signif & (sample > no_skill_value)
+    neg_signif = neg_signif & (sample < no_skill_value)
+    
+    return pos_signif | neg_signif
+
+
+def Fisher_z(ds):
+    """ Return the Fisher-z transformation of ds """
+    return np.arctanh(ds)
+
+
+def get_climatological_probabilities(obsv, period):
+    def _init_date_to_ensemble(ds):
+        """ Collapse all available init_dates at a given lead into a new ensemble dimension"""
+        ds_drop = ds.copy().dropna('init_date', how='all')
+        ds_drop = ds_drop.rename({'init_date': 'ensemble'})
+        return ds_drop.assign_coords({'ensemble': range(len(ds_drop['ensemble']))})
+    obsv_period = mask_time_period(obsv, period=period)
+    obsv_ensemble = obsv_period.groupby('lead_time').map(_init_date_to_ensemble)
+    clim_prob = obsv_ensemble.broadcast_like(obsv)
+    return clim_prob.assign_coords({'time': obsv['time']})
+
+
+def get_rolling_leadtime_averages(ds, list_of_months_to_average):
+    """ Return rolling averages along lead time stacked along new dimension"""
+    def _rolling_leadtime_average(ds, n_points, lead_time_name='lead_time'):
+        return ds.rolling({lead_time_name: n_points}, center=True).mean()
+    dst_dict = {'1 month': ds}
+    for avg in list_of_months_to_average:
+        dst_dict[str(avg)+' months'] = _rolling_leadtime_average(dst_dict['1 month'], 
+                                                                 n_points=avg)
+    dst = xr.concat(dst_dict.values(), dim='time_scale')
+    dst = dst.assign_coords(time_scale=[int(time_scale.split(' ')[0]) 
+                                        for time_scale in dst_dict.keys()])
+    dst = dst.assign_coords(time_scale_name=('time_scale', list(dst_dict.keys())))
+    return dst
+
+
+def jelly_plot(skill, stipple=None, stipple_type='//', stipple_color='k',
+               title=None, cmap=None, vlims=None, figsize=None):
+    
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    import matplotlib.patches as mpatches
+    
+    def _stipple(stipple, stipple_type):
+        if '/' in stipple_type:
+            for j, i in np.column_stack(
+                np.where(stipple)):
+                ax.add_patch(
+                    mpatches.Rectangle((i, j-0.5), 1, 1,    
+                                       fill=False, linewidth=0,
+                                       snap=False, hatch=stipple_type))
+        else:
+            xOrg = range(len(stipple[stipple.dims[1]]))
+            yOrg = range(len(stipple[stipple.dims[0]]))
+            nx = len(xOrg)
+            ny = len(yOrg)
+            xData = np.reshape( np.tile(xOrg, ny), stipple.shape )
+            yData = np.reshape( np.repeat(yOrg, nx), stipple.shape )
+            sigPoints = stipple > 0
+            xPoints = xData[sigPoints.values]
+            yPoints = yData[sigPoints.values]
+            ax.scatter(xPoints+0.5, yPoints, s=3, 
+                       c=stipple_color, marker=stipple_type, alpha=1)
+        
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    if vlims is None:
+        vlims = [None, None]
+               
+    x = np.arange(len(skill.lead_time)+1)
+    y = np.arange(len(skill.time_scale)+1)-0.5
+    c = skill.transpose('time_scale','lead_time')
+    im = ax.pcolor(x, y, c,
+                    vmin=vlims[0],
+                    vmax=vlims[1],
+                    cmap=cmap)
+    
+    if stipple is not None:
+        _stipple(stipple.transpose('time_scale','lead_time'), stipple_type)
+    
+    # Plot annotations
+    for y, ts in enumerate(skill.time_scale.values):
+        if y != 0:
+            ends = 0.15
+            line_color = 'grey'
+            ax.plot([0.5, ts-0.5], [y, y], 
+                    color=line_color, linewidth=1)
+            ax.plot([0.5, 0.5], [y-ends, y+ends], 
+                    color=line_color, linewidth=1)
+            ax.plot([ts-0.5, ts-0.5], [y-ends, y+ends], 
+                    color=line_color, linewidth=1)
+            ax.plot([int(ts/2)+0.5], y,
+                    marker='x', color=line_color, markersize=4, linewidth=1)
+    
+    # Add colorbar
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes('bottom', size='8%', pad=0.55)
+    fig.colorbar(im, cax=cax, orientation='horizontal')
+    
+    ax.set_xticks(range(0,120,6))
+    ax.set_yticks(range(len(skill.time_scale)))
+    ax.set_yticklabels(skill.time_scale_name.values)
+    ax.set_xlabel('Lead month')
+    ax.set_ylabel('Averaging period')
+    
+    if title:
+        ax.set_title(title)
