@@ -229,7 +229,7 @@ def get_monthly_clim(ds, dim, period=None):
 
 def get_monthly_anom(ds, dim, clim=None):
     """ Return the monthly anomalies"""
-    if clim:
+    if clim is not None:
         anom = (ds.groupby(f'{dim}.month') - clim).drop('month')
         anom.attrs['climatological_period'] = clim.attrs['climatological_period']
     else:
