@@ -335,11 +335,12 @@ def random_resample(*args, samples,
         sample : xarray DataArray or Dataset
             Array containing the results of passing the subsampled data through function
     """
+    samples_spec = samples.copy() # copy because use pop below
     args_sub = [obj.copy() for obj in args]
-    dim_block_1 = [d for d, s in samples.items() if s[1] == 1]
+    dim_block_1 = [d for d, s in samples_spec.items() if s[1] == 1]
 
     # Do all dimensions with block_size = 1 together
-    samples_block_1 = { dim: samples.pop(dim) for dim in dim_block_1 }
+    samples_block_1 = { dim: samples_spec.pop(dim) for dim in dim_block_1 }
     random_samples = {dim: 
                       np.random.choice(
                           len(args_sub[0][dim]),
@@ -351,7 +352,7 @@ def random_resample(*args, samples,
          for dim in (set(random_samples.keys()) & set(obj.dims))}) for obj in args_sub]
 
     # Do any remaining dimensions
-    for dim, (n, block_size) in samples.items():
+    for dim, (n, block_size) in samples_spec.items():
         n_blocks = int(n / block_size)
         random_samples = [slice(x,x+block_size) 
                           for x in np.random.choice(
