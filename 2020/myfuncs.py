@@ -367,9 +367,15 @@ def random_resample(*args, samples,
 
     if function:
         if bundle_args:
-            res = function(*args_sub, **function_kwargs)
+            if function_kwargs is not None:
+                res = function(*args_sub, **function_kwargs)
+            else:
+                res = function(*args_sub)
         else:
-            res = tuple([function(obj, **function_kwargs) for obj in args_sub])
+            if function_kwargs is not None:
+                res = tuple([function(obj, **function_kwargs) for obj in args_sub])
+            else:
+                res = tuple([function(obj) for obj in args_sub])
     else:
         res = tuple(args_sub,)
 
@@ -558,3 +564,20 @@ def jelly_plot(skill, stipple=None, stipple_type='//', stipple_color='k',
     
     if title:
         ax.set_title(title)
+        
+        
+def mean_correlation_ensemble_combinations(ds, dim='init_date', ensemble_dim='ensemble'):
+    """ Compute all combinations of correlations between ensemble 
+        members and return the mean
+    """
+    combinations = np.array(
+        list(itertools.combinations(range(len(ds.ensemble)), 2)))
+    e1 = ds.isel(
+        ensemble=combinations[:,0]).assign_coords(
+        {ensemble_dim: range(combinations.shape[0])})
+    e2 = ds.isel(
+        ensemble=combinations[:,1]).assign_coords(
+        {ensemble_dim: range(combinations.shape[0])})
+    corr_combinations = xs.spearman_r(e1, e2, dim=dim)
+    mean_corr = corr_combinations.mean(ensemble_dim)
+    return mean_corr
