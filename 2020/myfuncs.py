@@ -495,7 +495,8 @@ def get_rolling_leadtime_averages(ds, list_of_months_to_average):
 
 
 def jelly_plot(skill, stipple=None, stipple_type='//', stipple_color='k',
-               title=None, cmap=None, vlims=None, figsize=None):
+               title=None, cmap=None, vlims=None, ax=None, figsize=None,
+               add_labels=True):
     
     from mpl_toolkits.axes_grid1 import make_axes_locatable
     import matplotlib.patches as mpatches
@@ -518,10 +519,11 @@ def jelly_plot(skill, stipple=None, stipple_type='//', stipple_color='k',
             sigPoints = stipple > 0
             xPoints = xData[sigPoints.values]
             yPoints = yData[sigPoints.values]
-            ax.scatter(xPoints+0.5, yPoints, s=3, 
+            ax.scatter(xPoints+0.5, yPoints, s=1, 
                        c=stipple_color, marker=stipple_type, alpha=1)
         
-    fig, ax = plt.subplots(figsize=figsize)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
     
     if vlims is None:
         vlims = [None, None]
@@ -550,20 +552,24 @@ def jelly_plot(skill, stipple=None, stipple_type='//', stipple_color='k',
                     color=line_color, linewidth=1)
             ax.plot([int(ts/2)+0.5], y,
                     marker='x', color=line_color, markersize=4, linewidth=1)
+
+    if ax is None:
+        # Add colorbar
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('bottom', size='8%', pad=0.55)
+        fig.colorbar(im, cax=cax, orientation='horizontal')
     
-    # Add colorbar
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('bottom', size='8%', pad=0.55)
-    fig.colorbar(im, cax=cax, orientation='horizontal')
-    
-    ax.set_xticks(range(0,120,6))
+    ax.set_xticks(range(0,120,12))
     ax.set_yticks(range(len(skill.time_scale)))
-    ax.set_yticklabels(skill.time_scale_name.values)
-    ax.set_xlabel('Lead month')
-    ax.set_ylabel('Averaging period')
+    ax.set_yticklabels([s.strip(' months') for s in skill.time_scale_name.values])
+    if add_labels:
+        ax.set_xlabel('Lead month')
+        ax.set_ylabel('Averaging\nperiod')
     
     if title:
         ax.set_title(title)
+        
+    return ax, im
         
         
 def mean_correlation_ensemble_combinations(ds, dim='init_date', ensemble_dim='ensemble'):
