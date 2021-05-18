@@ -578,6 +578,6 @@ def mean_correlation_ensemble_combinations(ds, dim='init_date', ensemble_dim='en
     e2 = ds.isel(
         ensemble=combinations[:,1]).assign_coords(
         {ensemble_dim: range(combinations.shape[0])})
-    corr_combinations = xs.spearman_r(e1, e2, dim=dim)
+    corr_combinations = xs.spearman_r(e1, e2, dim=dim, skipna=True)
     mean_corr = corr_combinations.mean(ensemble_dim)
     return mean_corr

@@ -37,6 +37,7 @@ __pycache__
 # compressed files
 **.zip
 **.tar
+**.zarr
 
 # mac files
 .DS_Store
